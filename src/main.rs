@@ -47,38 +47,47 @@ pub fn calculate_balance_changes(
     definitions: Vec<DenomDefinition>,
     mut multi_send_tx: MultiSend,
 ) -> Result<Vec<Balance>, String> {
-    let mut input_sum: i128 = 0;
-    let mut output_sum: i128 = 0;
-
+    
     for input in &multi_send_tx.inputs {
+        let original_balance = find_balance(&input.address, &original_balances)
+            .ok_or(format!("Could not find original balance for address {}", &input.address))?;
+
         for coin in &input.coins {
-            input_sum += coin.amount;
+            let original_coin = original_balance.coins.iter()
+                .find(|c| c.denom == coin.denom)
+                .ok_or(format!("Could not find original coin for denom {}", &coin.denom))?;
+
+            if coin.amount > original_coin.amount {
+                return Err(format!("Sender does not have enough balance for denom {}", &coin.denom));
+            }
+
+            let definition = find_definition(&coin.denom, &definitions)
+                .ok_or(format!("Could not find DenomDefinition for input coin denom {}", &coin.denom))?;
+            
+            let issuer_balance = find_balance(&definition.issuer, &original_balances)
+                .ok_or(format!("Could not find original balance for issuer {}", &definition.issuer))?;
         }
     }
 
-    for output in &multi_send_tx.outputs {
-        for coin in &output.coins {
-            output_sum += coin.amount;
-        }
-    }
-
-    if input_sum != output_sum {
-        return Err("Sum of inputs and outputs does not match.".to_string());
-    }
+    let mut input_sum: i128 = 0;
+    let mut expected_output_sum: i128 = 0;
 
     for input in &mut multi_send_tx.inputs {
         for coin in &mut input.coins {
             let definition = find_definition(&coin.denom, &definitions)
-                .ok_or(format!("Could not find DenomDefinition for input coin denom {}", &coin.denom))?;
+                .unwrap();
 
             let burn = (coin.amount as f64 * definition.burn_rate).round() as i128;
             let commission = (coin.amount as f64 * definition.commission_rate).round() as i128;
 
             coin.amount -= burn;
             coin.amount -= commission;
+            input_sum += coin.amount + burn + commission;
+
+            expected_output_sum += coin.amount;
 
             let issuer_balance = find_balance(&definition.issuer, &mut original_balances)
-                .ok_or(format!("Could not find original balance for issuer {}", &definition.issuer))?;
+                .unwrap();
 
             let issuer_coin_position = issuer_balance.coins.iter().position(|c| c.denom == coin.denom);
 
@@ -96,19 +105,15 @@ pub fn calculate_balance_changes(
         }
     }
 
-    for input in &multi_send_tx.inputs {
-        let original_balance = find_balance(&input.address, &mut original_balances)
-            .ok_or(format!("Could not find original balance for address {}", &input.address))?;
-
-        for coin in &input.coins {
-            let original_coin = original_balance.coins.iter()
-                .find(|c| c.denom == coin.denom)
-                .ok_or(format!("Could not find original coin for denom {}", &coin.denom))?;
-
-            if coin.amount > original_coin.amount {
-                return Err(format!("Sender does not have enough balance for denom {}", &coin.denom));
-            }
+    let mut output_sum: i128 = 0;
+    for output in &multi_send_tx.outputs {
+        for coin in &output.coins {
+            output_sum += coin.amount;
         }
+    }
+
+    if input_sum != output_sum || expected_output_sum != output_sum {
+        return Err("Sum of inputs and outputs does not match.".to_string());
     }
 
     for output in &multi_send_tx.outputs {
@@ -123,17 +128,14 @@ pub fn calculate_balance_changes(
         }
 
         for coin in &output.coins {
-            let balance = original_balance
-                .as_mut()
-                .ok_or(format!("Could not find original balance for address {}", &output.address))?;
-            let coin_position = balance.coins.iter().position(|c| c.denom == coin.denom);
+            let original_coin_position = original_balance.as_mut().unwrap().coins.iter().position(|c| c.denom == coin.denom);
 
-            match coin_position {
+            match original_coin_position {
                 Some(pos) => {
-                    balance.coins[pos].amount += coin.amount;
+                    original_balance.as_mut().unwrap().coins[pos].amount += coin.amount;
                 },
                 None => {
-                    balance.coins.push(Coin {
+                    original_balance.as_mut().unwrap().coins.push(Coin {
                         denom: coin.denom.clone(),
                         amount: coin.amount,
                     });
@@ -143,7 +145,9 @@ pub fn calculate_balance_changes(
     }
 
     Ok(original_balances)
-}  // Remove the extra '}'
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -207,14 +211,14 @@ mod tests {
         };
 
         let result = super::calculate_balance_changes(original_balances.clone(), definitions, multi_send_tx).unwrap();
-        assert_eq!(result, vec![  // Add the missing '[' here
+        assert_eq!(result, vec![
             Balance {
                 address: "account1".to_string(),
-                coins: vec![],
+                coins: vec![Coin { denom: "denom1".to_string(), amount: 100 }],  // remaining balance after burn and commission
             },
             Balance {
                 address: "account2".to_string(),
-                coins: vec![],
+                coins: vec![Coin { denom: "denom2".to_string(), amount: 150 }],  // remaining balance after burn and commission
             },
             Balance {
                 address: "issuer_account_A".to_string(),
@@ -233,8 +237,6 @@ mod tests {
             },
         ]);
     }
-
-    // Add the missing closing bracket for 'mod tests' here
 }
 
     #[test]
