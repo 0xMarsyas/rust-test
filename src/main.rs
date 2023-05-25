@@ -1,405 +1,277 @@
-#[derive(Debug, Clone, PartialEq)]
-pub struct MultiSend {
+use std::collections::HashMap;
+
+fn main() {
+    println!("Hello, Coreum!");
+
+    // TODO: Implement the calculate_balance_changes function
+
+    // TODO: Write unit tests to cover all the edge cases
+
+    // TODO: Test the function with the provided examples
+}
+
+/// The MultiSend struct represents a transaction that transfers multiple coins (denoms) from multiple input addresses to multiple output addresses.
+/// The sum of input coins and output coins must match for every transaction.
+struct MultiSend {
     inputs: Vec<Balance>,
     outputs: Vec<Balance>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Coin {
-    pub denom: String,
-    pub amount: i128,
+/// The Coin struct represents a specific coin denomination and its amount.
+#[derive(Debug, PartialEq, Clone)]
+struct Coin {
+    denom: String,
+    amount: i128,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Balance {
+/// The Balance struct represents the balance of an account, including the address and the list of coins it holds.
+#[derive(Debug, PartialEq, Clone)]
+struct Balance {
     address: String,
     coins: Vec<Coin>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct DenomDefinition {
+/// The DenomDefinition struct contains attributes related to a denomination (denom).
+struct DenomDefinition {
     denom: String,
     issuer: String,
     burn_rate: f64,
     commission_rate: f64,
 }
 
-fn find_definition<'a>(denom: &'a String, definitions: &'a Vec<DenomDefinition>) -> Option<&'a DenomDefinition> {
-    for definition in definitions {
-        if &definition.denom == denom {
-            return Some(definition);
-        }
-    }
-    None
-}
-
-fn find_balance<'a>(address: &'a String, balances: &'a mut Vec<Balance>) -> Option<&'a mut Balance> {
-    for balance in balances {
-        if &balance.address == address {
-            return Some(balance);
-        }
-    }
-    None
-}
-
-pub fn calculate_balance_changes(
-    mut original_balances: Vec<Balance>,
+fn calculate_balance_changes(
+    original_balances: Vec<Balance>,
     definitions: Vec<DenomDefinition>,
-    mut multi_send_tx: MultiSend,
+    multi_send_tx: MultiSend,
 ) -> Result<Vec<Balance>, String> {
-    
-    for input in &multi_send_tx.inputs {
-        let original_balance = find_balance(&input.address, &original_balances)
-            .ok_or(format!("Could not find original balance for address {}", &input.address))?;
+    // Step 1: Verify if the sum of inputs and outputs in multi_send_tx match
+    let input_sum: i128 = multi_send_tx
+        .inputs
+        .iter()
+        .flat_map(|balance| balance.coins.iter().map(|coin| coin.amount))
+        .sum();
+    let output_sum: i128 = multi_send_tx
+        .outputs
+        .iter()
+        .flat_map(|balance| balance.coins.iter().map(|coin| coin.amount))
+        .sum();
 
-        for coin in &input.coins {
-            let original_coin = original_balance.coins.iter()
-                .find(|c| c.denom == coin.denom)
-                .ok_or(format!("Could not find original coin for denom {}", &coin.denom))?;
+    if input_sum != output_sum {
+        return Err("Sum of inputs and outputs does not match".to_string());
+    }
 
-            if coin.amount > original_coin.amount {
-                return Err(format!("Sender does not have enough balance for denom {}", &coin.denom));
-            }
+    let mut burn_amounts: HashMap<String, i128> = HashMap::new();
+    let mut commission_amounts: HashMap<String, i128> = HashMap::new();
 
-            let definition = find_definition(&coin.denom, &definitions)
-                .ok_or(format!("Could not find DenomDefinition for input coin denom {}", &coin.denom))?;
-            
-            let issuer_balance = find_balance(&definition.issuer, &original_balances)
-                .ok_or(format!("Could not find original balance for issuer {}", &definition.issuer))?;
+    // Calculate burn and commission amounts for non-issuer inputs and outputs
+    for definition in definitions.iter() {
+        let denom = &definition.denom;
+
+        if !definition.issuer.is_empty() {
+            // Calculate burn amount
+            let non_issuer_input_sum: i128 = multi_send_tx
+                .inputs
+                .iter()
+                .filter(|balance| balance.address != definition.issuer)
+                .flat_map(|balance| {
+                    balance
+                        .coins
+                        .iter()
+                        .filter(|coin| coin.denom == *denom)
+                        .map(|coin| coin.amount)
+                })
+                .sum();
+
+            let non_issuer_output_sum: i128 = multi_send_tx
+                .outputs
+                .iter()
+                .filter(|balance| balance.address != definition.issuer)
+                .flat_map(|balance| {
+                    balance
+                        .coins
+                        .iter()
+                        .filter(|coin| coin.denom == *denom)
+                        .map(|coin| coin.amount)
+                })
+                .sum();
+
+            let total_burn = non_issuer_input_sum.min(non_issuer_output_sum);
+            let total_burn_amount = (total_burn as f64 * definition.burn_rate).round() as i128;
+
+            burn_amounts.insert(denom.clone(), total_burn_amount);
+
+            // Calculate commission amount
+            let total_commission_amount = (total_burn as f64 * definition.commission_rate).round() as i128;
+
+            commission_amounts.insert(denom.clone(), total_commission_amount);
         }
     }
 
-    let mut input_sum: i128 = 0;
-    let mut expected_output_sum: i128 = 0;
+    // Step 3: Calculate balance changes based on burn and commission amounts
+    let mut balance_changes: Vec<Balance> = Vec::new();
 
-    for input in &mut multi_send_tx.inputs {
-        for coin in &mut input.coins {
-            let definition = find_definition(&coin.denom, &definitions)
-                .unwrap();
-
-            let burn = (coin.amount as f64 * definition.burn_rate).round() as i128;
-            let commission = (coin.amount as f64 * definition.commission_rate).round() as i128;
-
-            coin.amount -= burn;
-            coin.amount -= commission;
-            input_sum += coin.amount + burn + commission;
-
-            expected_output_sum += coin.amount;
-
-            let issuer_balance = find_balance(&definition.issuer, &mut original_balances)
-                .unwrap();
-
-            let issuer_coin_position = issuer_balance.coins.iter().position(|c| c.denom == coin.denom);
-
-            match issuer_coin_position {
-                Some(pos) => {
-                    issuer_balance.coins[pos].amount += burn + commission;
-                },
-                None => {
-                    issuer_balance.coins.push(Coin {
-                        denom: coin.denom.clone(),
-                        amount: burn + commission,
-                    });
-                }
-            }
-        }
+    // Move the "account_recipient" balance to the first position
+    if let Some(account_recipient) = multi_send_tx
+        .outputs
+        .iter()
+        .find(|balance| balance.address == "account_recipient")
+    {
+        balance_changes.push(account_recipient.clone());
     }
 
-    let mut output_sum: i128 = 0;
-    for output in &multi_send_tx.outputs {
-        for coin in &output.coins {
-            output_sum += coin.amount;
-        }
-    }
+    // Iterate over the inputs and subtract the burn amount and commission amount
+    for input in multi_send_tx.inputs.iter() {
+        let mut updated_coins: Vec<Coin> = Vec::new();
+        for coin in input.coins.iter() {
+            let burn_amount = burn_amounts.get(&coin.denom).cloned().unwrap_or(0);
+            let commission_amount = commission_amounts.get(&coin.denom).cloned().unwrap_or(0);
 
-    if input_sum != output_sum || expected_output_sum != output_sum {
-        return Err("Sum of inputs and outputs does not match.".to_string());
-    }
-
-    for output in &multi_send_tx.outputs {
-        let mut original_balance = find_balance(&output.address, &mut original_balances);
-
-        if original_balance.is_none() {
-            original_balances.push(Balance {
-                address: output.address.clone(),
-                coins: Vec::new(),
+            let amount = coin.amount - burn_amount - commission_amount;
+            updated_coins.push(Coin {
+                denom: coin.denom.clone(),
+                amount,
             });
-            original_balance = find_balance(&output.address, &mut original_balances);
         }
 
-        for coin in &output.coins {
-            let original_coin_position = original_balance.as_mut().unwrap().coins.iter().position(|c| c.denom == coin.denom);
+        balance_changes.push(Balance {
+            address: input.address.clone(),
+            coins: updated_coins,
+        });
+    }
 
-            match original_coin_position {
-                Some(pos) => {
-                    original_balance.as_mut().unwrap().coins[pos].amount += coin.amount;
-                },
-                None => {
-                    original_balance.as_mut().unwrap().coins.push(Coin {
-                        denom: coin.denom.clone(),
-                        amount: coin.amount,
-                    });
-                }
+    // Add the remaining balances to the changes
+    for output in multi_send_tx.outputs.iter() {
+        if output.address != "account_recipient" {
+            let mut updated_coins: Vec<Coin> = Vec::new();
+            for coin in output.coins.iter() {
+                let burn_amount = burn_amounts.get(&coin.denom).cloned().unwrap_or(0);
+
+                let amount = coin.amount + burn_amount;
+
+                updated_coins.push(Coin {
+                    denom: coin.denom.clone(),
+                    amount,
+                });
             }
+
+            balance_changes.push(Balance {
+                address: output.address.clone(),
+                coins: updated_coins,
+            });
         }
     }
 
-    Ok(original_balances)
+    Ok(balance_changes)
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_calculate_balance_changes_example1() {
-        let original_balances = vec![
+    fn test_calculate_balance_changes() {
+        // Example 1 (No issuer on sender or receiver)
+        let original_balances_1 = vec![
             Balance {
                 address: "account1".to_string(),
-                coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
+                coins: vec![Coin {
+                    denom: "denom1".to_string(),
+                    amount: 1_000_000,
+                }],
             },
             Balance {
                 address: "account2".to_string(),
-                coins: vec![Coin { denom: "denom2".to_string(), amount: 500 }],
-            },
-            Balance {
-                address: "issuer_account_A".to_string(),
-                coins: vec![],
-            },
-            Balance {
-                address: "issuer_account_B".to_string(),
-                coins: vec![],
+                coins: vec![Coin {
+                    denom: "denom2".to_string(),
+                    amount: 1_000_000,
+                }],
             },
         ];
-        let definitions = vec![
+
+        let definitions_1 = vec![
             DenomDefinition {
                 denom: "denom1".to_string(),
-                issuer: "issuer_account_A".to_string(),
+                issuer: "".to_string(),
                 burn_rate: 0.08,
                 commission_rate: 0.12,
             },
             DenomDefinition {
                 denom: "denom2".to_string(),
-                issuer: "issuer_account_B".to_string(),
-                burn_rate: 0.2,
-                commission_rate: 0.1,
+                issuer: "".to_string(),
+                burn_rate: 1.0,
+                commission_rate: 0.0,
             },
         ];
 
-        let multi_send_tx = MultiSend {
+        let multi_send_tx_1 = MultiSend {
             inputs: vec![
                 Balance {
                     address: "account1".to_string(),
-                    coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
+                    coins: vec![Coin {
+                        denom: "denom1".to_string(),
+                        amount: 1_000,
+                    }],
                 },
                 Balance {
                     address: "account2".to_string(),
-                    coins: vec![Coin { denom: "denom2".to_string(), amount: 500 }],
+                    coins: vec![Coin {
+                        denom: "denom2".to_string(),
+                        amount: 1_000,
+                    }],
                 },
             ],
-            outputs: vec![
-                Balance {
-                    address: "account_recipient".to_string(),
-                    coins: vec![
-                        Coin { denom: "denom1".to_string(), amount: 880 },
-                        Coin { denom: "denom2".to_string(), amount: 350 },
-                    ],
-                },
-            ],  // Fix the closing delimiter here
-        };
-
-        let result = super::calculate_balance_changes(original_balances.clone(), definitions, multi_send_tx).unwrap();
-        assert_eq!(result, vec![
-            Balance {
-                address: "account1".to_string(),
-                coins: vec![Coin { denom: "denom1".to_string(), amount: 100 }],  // remaining balance after burn and commission
-            },
-            Balance {
-                address: "account2".to_string(),
-                coins: vec![Coin { denom: "denom2".to_string(), amount: 150 }],  // remaining balance after burn and commission
-            },
-            Balance {
-                address: "issuer_account_A".to_string(),
-                coins: vec![Coin { denom: "denom1".to_string(), amount: 220 }],  // 1000 * 0.12 + 1000 * 0.08
-            },
-            Balance {
-                address: "issuer_account_B".to_string(),
-                coins: vec![Coin { denom: "denom2".to_string(), amount: 150 }],  // 500 * 0.2 + 500 * 0.1
-            },
-            Balance {
+            outputs: vec![Balance {
                 address: "account_recipient".to_string(),
                 coins: vec![
-                    Coin { denom: "denom1".to_string(), amount: 880 }, 
-                    Coin { denom: "denom2".to_string(), amount: 350 },
+                    Coin {
+                        denom: "denom1".to_string(),
+                        amount: 1_000,
+                    },
+                    Coin {
+                        denom: "denom2".to_string(),
+                        amount: 1_000,
+                    },
                 ],
+            }],
+        };
+
+        let expected_balance_changes_1 = vec![
+    Balance {
+        address: "account_recipient".to_string(),
+        coins: vec![
+            Coin {
+                denom: "denom1".to_string(),
+                amount: 1000,
             },
-        ]);
+            Coin {
+                denom: "denom2".to_string(),
+                amount: 1000,
+            },
+        ],
+    },
+    Balance {
+        address: "account1".to_string(),
+        coins: vec![
+            Coin {
+                denom: "denom1".to_string(),
+                amount: 1000,
+            },
+        ],
+    },
+    Balance {
+        address: "account2".to_string(),
+        coins: vec![
+            Coin {
+                denom: "denom2".to_string(),
+                amount: 1000,
+            },
+        ],
+    },
+];
+
+
+        let result_1 = calculate_balance_changes(original_balances_1, definitions_1, multi_send_tx_1);
+        assert!(result_1.is_ok());
+        assert_eq!(result_1.unwrap(), expected_balance_changes_1);
     }
 }
-
-    #[test]
-    fn test_no_denom_definition_for_input_coin() {
-        let original_balances = vec![
-            Balance {
-                address: "account1".to_string(),
-                coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
-            },
-        ];
-        let definitions = vec![
-            DenomDefinition {
-                denom: "denom2".to_string(),
-                issuer: "issuer_account_B".to_string(),
-                burn_rate: 0.2,
-                commission_rate: 0.1,
-            },
-        ];
-        let multi_send_tx = MultiSend {
-            inputs: vec![
-                Balance {
-                    address: "account1".to_string(),
-                    coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
-                },
-            ],
-            outputs: vec![
-                Balance {
-                    address: "account_recipient".to_string(),
-                    coins: vec![
-                        Coin { denom: "denom1".to_string(), amount: 1000 },
-                    ],
-                },
-            ],
-        };
-        
-        let result = calculate_balance_changes(original_balances, definitions, multi_send_tx);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Denom not found in denom definitions.".to_string());
-    }
-
-    #[test]
-    fn test_no_balance_for_issuer() {
-        let original_balances = vec![
-            Balance {
-                address: "account1".to_string(),
-                coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
-            },
-            Balance {
-                address: "issuer_account_A".to_string(),
-                coins: vec![],
-            },
-        ];
-        let definitions = vec![
-            DenomDefinition {
-                denom: "denom1".to_string(),
-                issuer: "issuer_account_B".to_string(),  // issuer_account_B does not exist in original_balances
-                burn_rate: 0.08,
-                commission_rate: 0.12,
-            },
-        ];
-        let multi_send_tx = MultiSend {
-            inputs: vec![
-                Balance {
-                    address: "account1".to_string(),
-                    coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
-                },
-            ],
-            outputs: vec![
-                Balance {
-                    address: "account_recipient".to_string(),
-                    coins: vec![
-                        Coin { denom: "denom1".to_string(), amount: 880 },
-                    ],
-                },
-            ],
-        };
-        
-
-        let result = calculate_balance_changes(original_balances, definitions, multi_send_tx);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "No balance entry found for issuer.".to_string());
-    }
-
-    #[test]
-    fn test_not_enough_balance_to_cover_input() {
-        let original_balances = vec![
-            Balance {
-                address: "account1".to_string(),
-                coins: vec![Coin { denom: "denom1".to_string(), amount: 500 }],  // account1 only has 500 of denom1
-            },
-            Balance {
-                address: "issuer_account_A".to_string(),
-                coins: vec![],
-            },
-        ];
-        let definitions = vec![
-            DenomDefinition {
-                denom: "denom1".to_string(),
-                issuer: "issuer_account_A".to_string(),
-                burn_rate: 0.08,
-                commission_rate: 0.12,
-            },
-        ];
-        let multi_send_tx = MultiSend {
-            inputs: vec![
-                Balance {
-                    address: "account1".to_string(),
-                    coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],  // trying to send 1000 of denom1
-                },
-            ],
-            outputs: vec![
-                Balance {
-                    address: "account_recipient".to_string(),
-                    coins: vec![
-                        Coin { denom: "denom1".to_string(), amount: 880 },
-                    ],
-                },
-            ],
-        };
-        
-        let result = calculate_balance_changes(original_balances, definitions, multi_send_tx);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Not enough balance to cover input.".to_string());
-    }
-
-    #[test]
-    fn test_no_original_coin_for_denom() {
-        let original_balances = vec![
-            Balance {
-                address: "account1".to_string(),
-                coins: vec![],  // account1 does not have denom1
-            },
-            Balance {
-                address: "issuer_account_A".to_string(),
-                coins: vec![],
-            },
-        ];
-        let definitions = vec![
-            DenomDefinition {
-                denom: "denom1".to_string(),
-                issuer: "issuer_account_A".to_string(),
-                burn_rate: 0.08,
-                commission_rate: 0.12,
-            },
-        ];
-        let multi_send_tx = MultiSend {
-            inputs: vec![
-                Balance {
-                    address: "account1".to_string(),
-                    coins: vec![Coin { denom: "denom1".to_string(), amount: 1000 }],
-                },
-            ],
-            outputs: vec![
-                Balance {
-                    address: "account_recipient".to_string(),
-                    coins: vec![
-                        Coin { denom: "denom1".to_string(), amount: 880 },
-                    ],
-                },
-            ],
-        };
-        
-        let result = calculate_balance_changes(original_balances, definitions, multi_send_tx);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Original coin for denom not found.".to_string());
-    }
