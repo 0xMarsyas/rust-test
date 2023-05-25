@@ -40,7 +40,7 @@ struct DenomDefinition {
 }
 
 fn calculate_balance_changes(
-    original_balances: Vec<Balance>,
+    _original_balances: Vec<Balance>,
     definitions: Vec<DenomDefinition>,
     multi_send_tx: MultiSend,
 ) -> Result<Vec<Balance>, String> {
@@ -274,4 +274,51 @@ mod tests {
         assert!(result_1.is_ok());
         assert_eq!(result_1.unwrap(), expected_balance_changes_1);
     }
+
+    #[test]
+    fn test_empty_inputs_and_outputs() {
+        let original_balances = vec![
+            Balance {
+                address: "account1".to_string(),
+                coins: vec![Coin {
+                    denom: "denom1".to_string(),
+                    amount: 1_000_000,
+                }],
+            },
+            Balance {
+                address: "account2".to_string(),
+                coins: vec![Coin {
+                    denom: "denom2".to_string(),
+                    amount: 1_000_000,
+                }],
+            },
+        ];
+
+        let definitions = vec![
+            DenomDefinition {
+                denom: "denom1".to_string(),
+                issuer: "".to_string(),
+                burn_rate: 0.08,
+                commission_rate: 0.12,
+            },
+            DenomDefinition {
+                denom: "denom2".to_string(),
+                issuer: "".to_string(),
+                burn_rate: 1.0,
+                commission_rate: 0.0,
+            },
+        ];
+
+        let multi_send_tx = MultiSend {
+            inputs: vec![],
+            outputs: vec![],
+        };
+
+        let result = calculate_balance_changes(original_balances, definitions, multi_send_tx);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec![]);
+    }
+    
+    
 }
+
